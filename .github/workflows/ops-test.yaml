@@ -35,7 +35,7 @@ on:
   workflow_dispatch:
     inputs:
       repo:
-        description: 'Target repo to test (a key under repos: in repos.yaml).'
+        description: 'Target repository configured in repos.yaml.'
         required: true
         type: choice
         default: FlagGems
@@ -46,31 +46,35 @@ on:
           - FlagTrain
           - FlagAttention
       branch:
-        description: 'optest branch supplying the workflow, package, and configs. Leave empty to use the branch this run was dispatched from (--ref).'
+        description: 'optest source branch. Empty = dispatched branch.'
         required: false
         default: ''
       ref:
-        description: 'Checkout ref of the TARGET repo code under test (branch name, commit SHA, or tag). Leave empty to use the repo default_branch from repos.yaml.'
+        description: 'Target repository ref. Empty = configured default branch.'
         required: false
         default: ''
       vendors:
-        description: 'Comma-separated vendor names to run on (case-insensitive, e.g. ascend,Nvidia,THEAD). Empty = all enabled vendors.'
+        description: 'Vendors to run, comma-separated. Empty = all enabled vendors.'
         required: false
         default: ''
       ops:
-        description: 'Comma-separated operators to test (e.g. abs,sum,add). Empty = all operator stages.'
+        description: 'Operators to include, comma-separated. Empty = all stages.'
+        required: false
+        default: ''
+      exclude_ops:
+        description: 'Operators to exclude, comma-separated. Empty = exclude none.'
         required: false
         default: ''
       upload_log:
-        description: 'Leave empty to publish results to op-monitor. Enter any value to skip the Publish results to op-monitor step.'
+        description: 'Result upload control. Empty = upload; any value = skip.'
         required: false
         default: ''
       send_feishu:
-        description: 'Leave empty to send Feishu notifications. Enter any value to skip the Send Feishu notification step.'
+        description: 'Feishu control. Empty = send; any value = skip.'
         required: false
         default: ''
       test_date:
-        description: 'Test date (YYYY-MM-DD) used for result paths, archive names and the upload test_date. Leave empty to use the current date.'
+        description: 'Result date (YYYY-MM-DD). Empty = today.'
         required: false
         default: ''
 
@@ -90,6 +94,7 @@ jobs:
       matrix_container: ${{ steps.build-matrix.outputs.matrix_container }}
       api: ${{ steps.build-matrix.outputs.api }}
       ops: ${{ steps.build-matrix.outputs.ops }}
+      exclude_ops: ${{ steps.build-matrix.outputs.exclude_ops }}
       publish_results: ${{ steps.build-matrix.outputs.publish_results }}
       send_feishu: ${{ steps.build-matrix.outputs.send_feishu }}
     steps:
@@ -115,6 +120,7 @@ jobs:
           REF_INPUT: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.ref || '' }}
           VENDORS_INPUT: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.vendors || '' }}
           OPS_INPUT: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.ops || '' }}
+          EXCLUDE_OPS_INPUT: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.exclude_ops || '' }}
           UPLOAD_LOG_INPUT: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.upload_log || '' }}
           SEND_FEISHU_INPUT: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.send_feishu || '' }}
         run: |
@@ -187,6 +193,7 @@ jobs:
 
           # ops: empty input -> "all" operator stages; otherwise the given ops.
           ops = os.environ.get('OPS_INPUT', '').strip() or 'all'
+          exclude_ops = os.environ.get('EXCLUDE_OPS_INPUT', '').strip()
           publish_results = 'true' if not os.environ.get('UPLOAD_LOG_INPUT', '').strip() else 'false'
           send_feishu = 'true' if not os.environ.get('SEND_FEISHU_INPUT', '').strip() else 'false'
 
@@ -197,6 +204,7 @@ jobs:
               out.write(f"matrix_container={json.dumps({'include': container_include})}\n")
               out.write(f"api={main['server']['api']}\n")
               out.write(f"ops={ops}\n")
+              out.write(f"exclude_ops={exclude_ops}\n")
               out.write(f"publish_results={publish_results}\n")
               out.write(f"send_feishu={send_feishu}\n")
 
@@ -233,6 +241,7 @@ jobs:
       TARGET_REPOSITORY: ${{ needs.prepare.outputs.target_repo }}
       TARGET_REF: ${{ needs.prepare.outputs.checkout_ref }}
       TEST_OPS: ${{ needs.prepare.outputs.ops }}
+      TEST_EXCLUDE_OPS: ${{ needs.prepare.outputs.exclude_ops }}
       OUTPUT_DIR: ${{ matrix.output_base_dir }}/${{ needs.prepare.outputs.library_name }}/${{ needs.prepare.outputs.date }}/logs_results_${{ needs.prepare.outputs.date }}
     steps:
       # Checkout optest itself (this repo) at workspace root: provides src/
@@ -724,6 +733,7 @@ jobs:
           echo "[Run ops tests] Test GPUs: ${AVAILABLE_GPUS}"
           echo "[Run ops tests] Test date: ${DATE}"
           echo "[Run ops tests] Test ops: ${TEST_OPS}"
+          echo "[Run ops tests] Excluded ops: ${TEST_EXCLUDE_OPS:-<none>}"
           mkdir -p "${OUTPUT_DIR}"
           # remove cache to avoid potential issues with stale files
           rm -rf ~/.triton/cache && rm -rf ~/.flaggems
@@ -747,6 +757,10 @@ jobs:
           else
             OP_ARGS="--ops ${OPS}"
           fi
+          EXCLUDE_OPS_ARG=""
+          if [ -n "${TEST_EXCLUDE_OPS}" ]; then
+            EXCLUDE_OPS_ARG="--exclude-ops ${TEST_EXCLUDE_OPS}"
+          fi
           # Optional per-repo ops baseline (repos.yaml base_data); path is
           # relative to the target checkout. Empty = not passed.
           BASE_DATA="${{ matrix.base_data }}"
@@ -755,14 +769,16 @@ jobs:
             BASE_DATA_ARG="--base-data ${BASE_DATA}"
           fi
           echo "[Run ops tests] Operator arguments: ${OP_ARGS}"
+          echo "[Run ops tests] Exclusion arguments: ${EXCLUDE_OPS_ARG:-<none>}"
           echo "[Run ops tests] Base data: ${BASE_DATA:-<none>}"
           echo "[Run ops tests] Base-data arguments: ${BASE_DATA_ARG:-<none>}"
           # Run from the target checkout so the installed scheduler discovers
           # its conf/operators.yaml, tests/ and benchmark/ from the cwd.
-          echo "[Run ops tests] Command: flagos-optest --gpus \"${AVAILABLE_GPUS}\" ${OP_ARGS} ${BASE_DATA_ARG} --dump-output --output-dir \"${OUTPUT_DIR}\""
+          echo "[Run ops tests] Command: flagos-optest --gpus \"${AVAILABLE_GPUS}\" ${OP_ARGS} ${EXCLUDE_OPS_ARG} ${BASE_DATA_ARG} --dump-output --output-dir \"${OUTPUT_DIR}\""
           flagos-optest \
             --gpus "${AVAILABLE_GPUS}" \
             ${OP_ARGS} \
+            ${EXCLUDE_OPS_ARG} \
             ${BASE_DATA_ARG} \
             --dump-output \
             --output-dir "${OUTPUT_DIR}"
@@ -773,6 +789,39 @@ jobs:
           flagos-psum-text -o "${OUTPUT_DIR}/result.csv" "${OUTPUT_DIR}"
           echo "[Run ops tests] Command: flagos-psum-html -o \"${OUTPUT_DIR}/result.html\" \"${OUTPUT_DIR}\""
           flagos-psum-html -o "${OUTPUT_DIR}/result.html" "${OUTPUT_DIR}"
+
+      - name: Collect test summary
+        id: test-summary
+        if: always()
+        shell: python3 {0}
+        run: |
+          import json
+          import os
+          from pathlib import Path
+
+          summary_path = Path(os.environ["OUTPUT_DIR"]) / "summary.json"
+          total_ops = ""
+          total_duration = ""
+          try:
+              summary = json.loads(summary_path.read_text(encoding="utf-8"))
+              if not isinstance(summary, dict):
+                  raise ValueError("summary root must be a JSON object")
+              total_ops_value = summary.get("total_ops")
+              total_duration_value = summary.get("total_duration")
+              if total_ops_value is not None:
+                  total_ops = str(total_ops_value).strip()
+              if total_duration_value is not None:
+                  total_duration = str(total_duration_value).strip()
+          except (OSError, TypeError, ValueError) as error:
+              print(f"::warning::Failed to read test summary from {summary_path}: {error}")
+
+          print(f"[Test summary] Total ops: {total_ops or '<empty>'}")
+          print(f"[Test summary] Total duration: {total_duration or '<empty>'}")
+
+          if total_ops and total_duration:
+              with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as output:
+                  output.write(f"total_ops={total_ops}\n")
+                  output.write(f"total_duration={total_duration}\n")
 
       - name: Package results
         run: |
@@ -829,6 +878,8 @@ jobs:
           # otherwise the target repo's configured default_branch.
           TARGET_REF: ${{ needs.prepare.outputs.checkout_ref }}
           OVERRIDE_SHA: ${{ steps.target-info.outputs.sha }}
+          TOTAL_OPS: ${{ steps.test-summary.outputs.total_ops }}
+          TOTAL_DURATION: ${{ steps.test-summary.outputs.total_duration }}
           FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
           FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
           FEISHU_CHAT_ID: ${{ secrets.FEISHU_CHAT_ID }}
