@@ -29,6 +29,8 @@
 #     --device 7 --output op_vllm_perf_baseline.json \
 #     --ops-dir target/baseline
 name: nv-baseline
+# Per-run title in the Actions list, e.g. "nv-baseline-FlagTrain".
+run-name: nv-baseline-${{ github.event.inputs.repo }}
 
 permissions:
   contents: read
@@ -195,6 +197,112 @@ jobs:
         run: |
           git config --global --add safe.directory "${GITHUB_WORKSPACE}"
           git config --global --add safe.directory "${GITHUB_WORKSPACE}/target"
+
+      # FlagTrain only: its baseline modules hard-depend on DeepSpeed and
+      # Megatron-LM (native() raises if missing, no torch fallback), so install
+      # them per baseline/README.md before collection. Other repos ship their
+      # stack in the image and skip this step.
+      - name: Install FlagTrain baseline dependencies
+        if: ${{ github.event.inputs.repo == 'FlagTrain' }}
+        shell: bash --login -e -o pipefail {0}
+        run: |
+          echo "[Deps] Installing FlagTrain baseline dependencies"
+          WORK="${GITHUB_WORKSPACE}/flagtrain_deps"
+          mkdir -p "${WORK}"
+          # FlagTrain reuses the vllm image; remove vllm so it cannot interfere
+          # with the DeepSpeed / Megatron stack this baseline needs.
+          python3 -m pip uninstall -y vllm || true
+
+          # DeepSpeed / Megatron ship CUDA C++ extensions that are JIT-compiled
+          # at collection time. This image provides CUDA via the pip package
+          # nvidia/cu13, which is not on the compiler/linker search path, so the
+          # JIT build fails with "ld: cannot find -lcudart". Resolve the cu13
+          # root, create the unversioned libcudart.so symlink the linker needs,
+          # and export the toolchain env to GITHUB_ENV so the later GPU-check and
+          # collection steps (where the JIT build actually runs) inherit it.
+          CU13_ROOT="$(python3 -c 'import importlib.util, os; s=importlib.util.find_spec("nvidia.cu13"); print(os.path.dirname(s.origin) if s and s.origin else "")')"
+          if [ -z "${CU13_ROOT}" ] || [ ! -d "${CU13_ROOT}" ]; then
+            CU13_ROOT="/flagos/lib/python3.12/site-packages/nvidia/cu13"
+          fi
+          echo "[Deps] CUDA (cu13) root: ${CU13_ROOT}"
+          CU13_LIB="${CU13_ROOT}/lib"
+          # The linker wants unversioned libFOO.so, but the cu13 wheel ships
+          # only libFOO.so.NN. Different extensions link different CUDA libs
+          # (-lcudart, -lcurand, -lcublas, ...), so create the missing
+          # unversioned symlink for every versioned lib under cu13/lib.
+          if [ -d "${CU13_LIB}" ]; then
+            for versioned in "${CU13_LIB}"/lib*.so.*; do
+              [ -e "${versioned}" ] || continue
+              base="$(basename "${versioned}")"
+              # Strip everything from the first ".so" onward -> libFOO.so
+              unversioned="${base%%.so.*}.so"
+              if [ ! -e "${CU13_LIB}/${unversioned}" ]; then
+                ln -sf "${versioned}" "${CU13_LIB}/${unversioned}"
+                echo "[Deps] Linked ${unversioned} -> ${base}"
+              fi
+            done
+          fi
+          {
+            echo "CUDA_HOME=${CU13_ROOT}"
+            echo "CUDA_PATH=${CU13_ROOT}"
+            echo "PATH=${CU13_ROOT}/bin:${PATH}"
+            echo "LD_LIBRARY_PATH=${CU13_LIB}:${LD_LIBRARY_PATH:-}"
+            echo "LIBRARY_PATH=${CU13_LIB}:${LIBRARY_PATH:-}"
+          } >> "$GITHUB_ENV"
+          # Apply to this step too (GITHUB_ENV only affects subsequent steps).
+          export CUDA_HOME="${CU13_ROOT}" CUDA_PATH="${CU13_ROOT}"
+          export PATH="${CU13_ROOT}/bin:${PATH}"
+          export LD_LIBRARY_PATH="${CU13_LIB}:${LD_LIBRARY_PATH:-}"
+          export LIBRARY_PATH="${CU13_LIB}:${LIBRARY_PATH:-}"
+
+          # Prebuilt wheels: DeepSpeed kernels, CUTLASS ops, NVIDIA resiliency ext.
+          # deepspeed-kernels has no plain 0.0.1 on PyPI (only 0.0.1.devNNNN
+          # prereleases), so pin the latest dev build explicitly.
+          python3 -m pip install \
+            deepspeed-kernels==0.0.1.dev1698255861 \
+            nvidia-cutlass==3.8.0.0 \
+            nvidia-resiliency-ext==0.6.0
+          # DeepSpeed from source (main).
+          if [ ! -d "${WORK}/DeepSpeed" ]; then
+            git clone --depth 1 https://github.com/deepspeedai/DeepSpeed.git "${WORK}/DeepSpeed"
+          fi
+          python3 -m pip install -e "${WORK}/DeepSpeed"
+          # Megatron-LM from source (main), provides megatron.core.
+          if [ ! -d "${WORK}/Megatron-LM" ]; then
+            git clone --depth 1 https://github.com/NVIDIA/Megatron-LM.git "${WORK}/Megatron-LM"
+          fi
+          python3 -m pip install -e "${WORK}/Megatron-LM"
+          # NVIDIA Apex with CUDA extensions: Megatron's fused softmax baselines
+          # (scaled_masked_softmax_cuda, scaled_upper_triang_masked_softmax_cuda)
+          # are provided by Apex's compiled extensions, not Megatron itself. Build
+          # from source with the C++/CUDA extensions enabled (slow). Relies on the
+          # cu13 toolchain env + symlinks set above.
+          if [ ! -d "${WORK}/apex" ]; then
+            git clone --depth 1 https://github.com/NVIDIA/apex.git "${WORK}/apex"
+          fi
+          # Apex's setup.py calls check_cuda_torch_binary_vs_bare_metal(), which
+          # raises when nvcc's version does not exactly match the CUDA torch was
+          # built with. This image's nvcc is 13.2 but torch is +cu130 (13.0), a
+          # minor mismatch Apex's own comment calls safe but still rejects. No
+          # bypass flag exists, so comment out the check before building.
+          python3 - <<'PATCH'
+          from pathlib import Path
+          p = Path("${WORK}/apex/setup.py")
+          src = p.read_text()
+          line = "check_cuda_torch_binary_vs_bare_metal(CUDA_HOME)"
+          if line in src and not src.startswith("# ") and src.count(line) == 1:
+              p.write_text(src.replace(line, "# " + line + "  # patched: nvcc 13.2 vs torch cu130"))
+              print("[Deps] Patched apex setup.py: disabled CUDA version check")
+          else:
+              print("[Deps] apex setup.py check already patched or line not found; leaving as-is")
+          PATCH
+          python3 -m pip install -v --no-build-isolation \
+            --config-settings "--build-option=--cpp_ext" \
+            --config-settings "--build-option=--cuda_ext" \
+            "${WORK}/apex"
+          echo "[Deps] Verifying imports"
+          python3 -c "import deepspeed, megatron.core; print('deepspeed', deepspeed.__version__); print('megatron.core OK')"
+          python3 -c "import scaled_masked_softmax_cuda, scaled_upper_triang_masked_softmax_cuda; print('apex softmax extensions OK')"
 
       - name: Check NVIDIA GPU and profiler
         shell: bash --login -e -o pipefail {0}
