@@ -103,6 +103,10 @@ repos:
   # =========================================================================
   FlagGems-sglang:
     default_branch: master
+    # Ops-baseline JSON the nv-baseline workflow commits under optest's data/
+    # dir; ops-test passes it via --base-data so the benchmark reports the
+    # vs-baseline ratio. Same wiring as FlagGems-vllm.
+    base_data: data/op_sglang_perf_baseline.json
     # sglang ships its own images per backend, so this repo OVERRIDES the shared
     # backend defaults. Keep only backends enabled below.
     container_images:
@@ -131,6 +135,10 @@ repos:
   # =========================================================================
   FlagTrain:
     default_branch: main
+    # Ops-baseline JSON the nv-baseline workflow commits under optest's data/
+    # dir; ops-test passes it via --base-data so the benchmark reports the
+    # vs-baseline ratio. Same wiring as FlagGems-vllm.
+    base_data: data/op_flagtrain_perf_baseline.json
     # The operator suite needs the longer per-command timeout, matching
     # FlagGems; 600s is too tight for FlagTrain's heavier operators.
     op_cmd_timeout: 1800
@@ -142,6 +150,7 @@ repos:
       H800: harbor.baai.ac.cn/flagos-app/megatron_rl0.17.1-generic-13.3:2.2.0-0.2.3
       BW1000: harbor.baai.ac.cn/flagos-app/megatron_rl0.17.1-hygon-dtk26.04:2.2.0-0.2.3
       BI-V150: harbor.baai.ac.cn/flagos-app/megatron_rl0.17.1-iluvatar-corex4.5.0:2.2.0-0.2.3
+      PPU-ZW810E: harbor.baai.ac.cn/flagos-runtime/flagos-runtime-thead-ppu2.1.0:2.3.0
       P800: harbor.baai.ac.cn/flagos-app/megatron_rl0.17.1-kunlunxin-xre5.37.1:2.2.0-0.2.3
       910B: harbor.baai.ac.cn/flagos-app/megatron_rl0.17.1-ascend-cann9.0.0:2.2.0-0.2.3
       C550: harbor.baai.ac.cn/flagos-app/megatron_rl0.17.1-metax-maca3.8.1.3:2.2.0-0.2.3
@@ -154,12 +163,12 @@ repos:
       BW1000: {enabled: true}
       MTT-S5000: {enabled: true}
       BI-V150: {enabled: true}
-      PPU-ZW810E: {enabled: false}
+      PPU-ZW810E: {enabled: true}
       MLU590-M9DE: {enabled: false}
-      P800: {enabled: false}  # FlagTrain: unsupported for now.
+      P800: {enabled: true}
       W7900D: {enabled: false}
       TX8110: {enabled: false}
-      S60: {enabled: false}   # FlagTrain: unsupported for now.
+      S60: {enabled: true}
 
   # =========================================================================
   FlagAttention:
@@ -177,7 +186,7 @@ repos:
       P800: {enabled: true}
       W7900D: {enabled: false}
       TX8110: {enabled: false}
-      S60: {enabled: false}   # Enflame disabled outside FlagGems for now.
+      S60: {enabled: true}
 
 # ---------------------------------------------------------------------------
 # Optional explicit dependency install (example; omit the whole key to skip):

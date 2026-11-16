@@ -46,10 +46,6 @@ on:
           - FlagGems-sglang
           - FlagTrain
           - FlagAttention
-      branch:
-        description: 'optest source branch. Empty = dispatched branch.'
-        required: false
-        default: ''
       ref:
         description: 'Target repository ref. Empty = configured default branch.'
         required: false
@@ -89,6 +85,7 @@ jobs:
     timeout-minutes: 5
     outputs:
       date: ${{ steps.get-date.outputs.DATE }}
+      time_suffix: ${{ steps.get-date.outputs.TIME_SUFFIX }}
       checkout_ref: ${{ steps.build-matrix.outputs.checkout_ref }}
       target_repo: ${{ steps.build-matrix.outputs.target_repo }}
       library_name: ${{ steps.build-matrix.outputs.library_name }}
@@ -98,18 +95,17 @@ jobs:
       publish_results: ${{ steps.build-matrix.outputs.publish_results }}
       send_feishu: ${{ steps.build-matrix.outputs.send_feishu }}
     steps:
-      # Checkout optest itself (this repo) for repos.yaml + backend configs.
-      # `branch` input picks the optest branch; empty -> the dispatched ref.
+      # Checkout optest itself at the dispatched ref for repo/backend configs.
       - name: Checkout optest workflow source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.branch || '' }}
 
       - id: get-date
         env:
           # Optional test_date input; empty for default runs.
           TEST_DATE_INPUT: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.test_date || '' }}
-        run: echo "DATE=${TEST_DATE_INPUT:-$(date '+%Y-%m-%d')}" >> "$GITHUB_OUTPUT"
+        run: |
+          echo "DATE=${TEST_DATE_INPUT:-$(date '+%Y-%m-%d')}" >> "$GITHUB_OUTPUT"
+          echo "TIME_SUFFIX=$(date '+_%H%M%S')" >> "$GITHUB_OUTPUT"
 
       - id: build-matrix
         shell: python3 {0}
@@ -267,6 +263,7 @@ jobs:
       volumes: ${{ matrix.container_volumes }}
     env:
       DATE: ${{ needs.prepare.outputs.date }}
+      TIME_SUFFIX: ${{ needs.prepare.outputs.time_suffix }}
       # Library/repo name drives the results path, archive name and upload label.
       REPOSITORY_NAME: ${{ needs.prepare.outputs.library_name }}
       TARGET_REPOSITORY: ${{ needs.prepare.outputs.target_repo }}
@@ -277,16 +274,13 @@ jobs:
       TARGET_DIR: ${{ needs.prepare.outputs.library_name }}
       TEST_OPS: ${{ needs.prepare.outputs.ops }}
       TEST_EXCLUDE_OPS: ${{ needs.prepare.outputs.exclude_ops }}
-      OUTPUT_DIR: ${{ matrix.output_base_dir }}/${{ needs.prepare.outputs.library_name }}/${{ needs.prepare.outputs.date }}/logs_results_${{ needs.prepare.outputs.date }}
+      OUTPUT_DIR: ${{ matrix.output_base_dir }}/${{ needs.prepare.outputs.library_name }}/${{ needs.prepare.outputs.date }}${{ needs.prepare.outputs.time_suffix }}/logs_results_${{ needs.prepare.outputs.date }}${{ needs.prepare.outputs.time_suffix }}
     steps:
-      # Checkout optest itself (this repo) at workspace root: provides src/
-      # and configs. `branch` input picks the optest branch; empty -> the
-      # dispatched ref. The target library is checked out separately into the
-      # per-repo directory ./<repo> (TARGET_DIR).
+      # Checkout optest itself at the dispatched ref and workspace root to
+      # provide src/ and configs. The target library is checked out separately
+      # into the per-repo directory ./<repo> (TARGET_DIR).
       - name: Checkout optest source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.branch || '' }}
 
       # Checkout the TARGET repo (the library under test) into ./<repo>, with
       # the same 3-attempt retry the previous single-repo workflow used.
@@ -956,7 +950,7 @@ jobs:
 
       - name: Package results
         run: |
-          ARCHIVE="${{ matrix.output_base_dir }}/${REPOSITORY_NAME}/${REPOSITORY_NAME}-${{ matrix.name }}-${DATE}.tar.gz"
+          ARCHIVE="${{ matrix.output_base_dir }}/${REPOSITORY_NAME}/${REPOSITORY_NAME}-${{ matrix.name }}-${DATE}${TIME_SUFFIX}.tar.gz"
           mkdir -p "${OUTPUT_DIR}" "$(dirname "${ARCHIVE}")"
           tar -czf "${ARCHIVE}" -C "$(dirname "${OUTPUT_DIR}")" "$(basename "${OUTPUT_DIR}")"
           echo "ARCHIVE=${ARCHIVE}" >> "$GITHUB_ENV"
