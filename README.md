@@ -26,6 +26,7 @@ result-labeling, web-data conversion, and vendor-specific GPU checking toolsuite
 - [Target repository dependencies with uv](#target-repository-dependencies-with-uv)
   - [Configure test and vendor extras](#configure-test-and-vendor-extras)
   - [Centralized workflow behavior](#centralized-workflow-behavior)
+  - [FlagTree upgrade](#flagtree-upgrade)
   - [Persistent package cache](#persistent-package-cache)
 - [Repository layout](#repository-layout)
   - [Repository configuration](#repository-configuration)
@@ -715,6 +716,90 @@ replace packages such as numpy. Target-specific package names and exclusion
 policy therefore stay in the target repository's `pyproject.toml`, not in
 `repos.yaml` or the workflow.
 
+### FlagTree upgrade
+
+After installing `optest` and before probing GPUs, the workflow replaces the
+image-provided FlagTree source tree with the backend-specific configured wheel.
+A backend opts in with a `flagtree` block in its shared hardware configuration:
+
+```yaml
+# .github/configs/backends/H800.yaml
+flagtree:
+  package_name: flagtree-nvidia
+  version: 0.7.1.dev20261115
+  index_url: https://resource.flagos.net/repository/flagos-pypi-daily/simple
+```
+
+All three fields are required together. Most backends use a complete daily
+version. This matters for runtimes with a different version base; for example,
+the CANN 9.0.0 distribution uses `0.7.0.devYYYYMMDD`, while most other daily
+distributions use `0.7.1.devYYYYMMDD`.
+
+BW1000 uses `flagtree-hcu==0.7.1.dev20261104` from the FlagOS daily index. Its
+backend YAML retains the previous compatible `flagtree==0.7.1a1+hcu3.6`
+release mapping as a commented fallback.
+
+The optional `flagtree_version` workflow-dispatch input requests an override in
+one of these forms:
+
+- A complete daily or release version, such as `0.7.1.dev20261015` or
+  `0.7.1a1+hcu3.6`, is checked unchanged for every selected backend.
+- An eight-digit date such as `20261015` keeps each backend's configured
+  version base. The same run therefore resolves H800 to
+  `0.7.1.dev20261015` and 910B to `0.7.0.dev20261015`.
+
+Before adding an override to the matrix, the prepare job checks the backend's
+own `package_name` and `index_url`. If that exact version does not exist, or the
+index cannot be queried, the job emits a `FlagTree version fallback` warning
+and keeps that backend's YAML default. Other backends independently use the
+override when their package contains it, so one missing vendor build does not
+fail the whole run. A date cannot be expanded from a fixed release default; in
+that case the backend warns and keeps its release pin. An empty input uses
+every backend default without querying the indexes.
+
+The `Upgrade Flagtree` step runs only when the selected backend has this block.
+It installs the exact vendor wheel with `uv pip install --no-deps --target
+/opt/flagtree.new` and only after installation succeeds removes the old
+`/opt/flagtree` and moves the staged directory into its place. A failed
+resolution or installation therefore leaves the original tree intact. The
+command inherits the persistent per-vendor `UV_CACHE_DIR`;
+unlike the previous manual pip flow, it does not disable the package cache.
+The step prints release metadata before replacement and, afterward, shows the
+backend distribution through its target directory. It then checks whether
+`/opt/flagtree` is already on `PYTHONPATH`, logs and keeps an existing entry, or
+prepends it when missing. The effective value is written to `GITHUB_ENV` so all
+later Python and pytest commands use the replacement. Finally, `ACTIVE_PYTHON`
+must resolve the configured distribution to the exact requested version; this
+avoids treating a bare `pip show`, which cannot see an unactivated target
+directory, as an installation check.
+Backends with no `flagtree` block skip the step and retain the image-provided
+tree; this currently applies only to Cambricon.
+
+A target repository can opt out without changing the shared backend defaults:
+
+```yaml
+repos:
+  KeepImageFlagTreeEverywhere:
+    skip_flagtree_upgrade: true
+
+  KeepImageFlagTreeOnSelectedHardware:
+    skip_flagtree_upgrade: [H800, 910B]
+```
+
+The boolean form skips the step for the entire repository. The list form skips
+only the named backends; all other configured backends still receive their
+configured wheels. Omit `skip_flagtree_upgrade` for the normal upgrade behavior.
+The current `FlagGems` 910B exception uses the CANN 9.2.1 runtime image and
+retains its image-provided FlagTree because the shared 910B daily wheel targets
+CANN 9.0.0. Other FlagGems backends and the 910B backend in other repositories
+continue to use their normal FlagTree upgrade configuration. `FlagGems` also
+uses its current T-Head PPU 2.1.0 and AMD ROCm 7.2.4 runtime images through
+repository-specific overrides; both still receive their configured FlagTree
+daily wheels. Its Cambricon backend similarly uses the current Neuware 4.7.2
+shared backend image, but retains the image-provided FlagTree because no
+Cambricon daily distribution is configured. Only FlagGems currently enables
+this backend, so it does not need a repository-specific image override.
+
 ### Persistent package cache
 
 Target dependencies include large wheels (for example `vllm`,
@@ -750,7 +835,8 @@ How this behaves across runs:
   changed direct-URL requirement re-downloads only the changed wheel
   automatically. No manual cache invalidation is needed.
 
-Both install steps run `uv pip install -v` and print a `[Cache debug]` report
+The optest, FlagTree, and target-dependency install steps use normal
+`uv pip install` output. All three print a `[Cache debug]` report
 (the resolved `UV_CACHE_DIR`/`PIP_CACHE_DIR`/`UV_LINK_MODE`, and whether the
 cache is `COLD` or `WARM` with its size and file count) before and after
 installing, so the step log clearly shows which wheels were reused from the
@@ -815,6 +901,7 @@ form the GitHub checkout target. Each repository entry can define:
 | `default_branch` | Target branch used when the workflow does not receive an explicit ref. |
 | `backends.<name>.enabled` | Enables or disables a shared hardware backend for that repository. |
 | `container_images.<backend>` | Repository-specific image override for a backend. |
+| `skip_flagtree_upgrade` | Optional `true` to retain image FlagTree on every backend, or a backend-name list for selected exceptions. |
 | `deps.default` | Explicit fallback packages installed for every enabled backend. Prefer target `pyproject.toml` vendor extras. |
 | `deps.<backend>` | Explicit fallback packages installed only for one backend. Prefer target `pyproject.toml` vendor extras. |
 | `base_data` | Optional performance-baseline JSON path in the target checkout. |
@@ -860,6 +947,7 @@ hardware configuration shared by all repositories:
 | `container_image` | Default image, unless the selected repository overrides it. |
 | `container_volumes` | Host paths mounted into the job container. |
 | `container_options` | Device mappings, privileges, IPC, shared memory, and other container runtime options. |
+| `flagtree` | Optional backend wheel mapping with required `package_name`, full default `version`, and `index_url`; absence retains image FlagTree. |
 | `test_gpus` | Optional device-ID override; when omitted, `flagos-gpu-check` supplies the available devices. |
 | `test_env` | Environment variables injected into the operator-test step. |
 | `deps` | Hardware-specific packages prepended to repository dependency groups. |
@@ -872,20 +960,20 @@ S60/Enflame. Their current scheduling defaults are summarized below; the image,
 volume, container-option, and environment details remain authoritative in each
 backend YAML file.
 
-| Backend | Vendor | Runner label | Default test devices | Output base |
-| --- | --- | --- | --- | --- |
-| `H800` | Nvidia | `h800-flaggems-weekly` | detected | `/data/github-outputs` |
-| `910B` | Ascend | `910b-flaggems-weekly` | detected | `/data/github-outputs` |
-| `C550` | Metax | `c550-flaggems-weekly` | detected | `/data/github-outputs` |
-| `BW1000` | Hygon | `bw1000-flaggems-weekly` | detected | `/data/github-outputs` |
-| `MTT-S5000` | MThreads | `s5000-flaggems-weekly` | detected | `/data/github-outputs` |
-| `BI-V150` | Iluvatar | `v150-flaggems-weekly` | detected | `/data/github-outputs` |
-| `PPU-ZW810E` | THead | `810e-flaggems-weekly` | detected | `/home/github-outputs` |
-| `MLU590-M9DE` | Cambricon | `mlu590-m9de-flaggems-weekly` | detected | `/data/github-outputs` |
-| `P800` | KunLunXin | `p800-flaggems-weekly` | detected | `/data/github-outputs` |
-| `W7900D` | AMD | `w7900d-flaggems-weekly` | detected | `/data/github-outputs` |
-| `TX8110` | TsingMicro | `tx8110-flaggems-weekly` | `0-15` (override) | `/data/github-outputs` |
-| `S60` | Enflame | `s60-flaggems-weekly` | detected | `/data/github-outputs` |
+| Backend | Vendor | Runner label | FlagTree package | Default test devices | Output base |
+| --- | --- | --- | --- | --- | --- |
+| `H800` | Nvidia | `h800-flaggems-weekly` | `flagtree-nvidia` | detected | `/data/github-outputs` |
+| `910B` | Ascend | `910b-flaggems-weekly` | `flagtree-ascend-cann9.0.0` | detected | `/data/github-outputs` |
+| `C550` | Metax | `c550-flaggems-weekly` | `flagtree-metax` | detected | `/data/github-outputs` |
+| `BW1000` | Hygon | `bw1000-flaggems-weekly` | `flagtree-hcu` | detected | `/data/github-outputs` |
+| `MTT-S5000` | MThreads | `s5000-flaggems-weekly` | `flagtree-mthreads` | detected | `/data/github-outputs` |
+| `BI-V150` | Iluvatar | `v150-flaggems-weekly` | `flagtree-iluvatar` | detected | `/data/github-outputs` |
+| `PPU-ZW810E` | THead | `810e-flaggems-weekly` | `flagtree-ppu` | detected | `/home/github-outputs` |
+| `MLU590-M9DE` | Cambricon | `mlu590-m9de-flaggems-weekly` | image-provided | detected | `/data/github-outputs` |
+| `P800` | KunLunXin | `p800-flaggems-weekly` | `flagtree-kunlunxin` | detected | `/data/github-outputs` |
+| `W7900D` | AMD | `w7900d-flaggems-weekly` | `flagtree-amd` | detected | `/data/github-outputs` |
+| `TX8110` | TsingMicro | `tx8110-flaggems-weekly` | `flagtree-tsingmicro` | `0-15` (override) | `/data/github-outputs` |
+| `S60` | Enflame | `s60-flaggems-weekly` | `flagtree-enflame` | detected | `/data/github-outputs` |
 
 All current backends use containers, and the workflow always invokes
 `flagos-gpu-check`. Keep repository-specific policy in `repos.yaml`; change a
