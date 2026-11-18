@@ -1730,7 +1730,126 @@
           ],
           "timing_protocol": "triton-do-bench-no-graph-25ms-warmup-100ms-median"
         }
+      },
+      "[4096, 64, 512]": {
+        "torch.bfloat16": {
+          "config": {
+            "inputs": {
+              "o": {
+                "shape": [4096, 64, 512],
+                "dtype": "torch.bfloat16",
+                "fill": "randn"
+              },
+              "positions": {
+                "shape": [4096],
+                "dtype": "torch.int64"
+              },
+              "cos_sin_cache": {
+                "shape": [65536, 64],
+                "dtype": "torch.float32"
+              },
+              "wo_a.weight": {
+                "shape": [8, 1024, 4096],
+                "dtype": "torch.float8_e4m3fn"
+              },
+              "wo_a.weight_scale_inv": {
+                "shape": [8, 8, 32],
+                "dtype": "torch.float32"
+              },
+              "n_groups": {
+                "scalar": 8
+              },
+              "heads_per_group": {
+                "scalar": 8
+              },
+              "nope_dim": {
+                "scalar": 448
+              },
+              "rope_dim": {
+                "scalar": 64
+              },
+              "o_lora_rank": {
+                "scalar": 1024
+              }
+            },
+            "outputs": {
+              "out": {
+                "shape": [4096, 8192],
+                "dtype": "torch.bfloat16"
+              }
+            },
+            "dims": {
+              "tokens": 4096,
+              "n_groups": 8,
+              "group_dim": 4096,
+              "o_lora_rank": 1024
+            }
+          },
+          "timing_protocol": "triton-do-bench-no-graph-25ms-warmup-100ms-median",
+          "latency_ms": 0.5285,
+          "bottle_neck_unit": "tensor"
+        }
+      },
+      "[4096, 128, 512]": {
+        "torch.bfloat16": {
+          "config": {
+            "inputs": {
+              "o": {
+                "shape": [4096, 128, 512],
+                "dtype": "torch.bfloat16",
+                "fill": "randn"
+              },
+              "positions": {
+                "shape": [4096],
+                "dtype": "torch.int64"
+              },
+              "cos_sin_cache": {
+                "shape": [65536, 64],
+                "dtype": "torch.float32"
+              },
+              "wo_a.weight": {
+                "shape": [16, 1024, 4096],
+                "dtype": "torch.float8_e4m3fn"
+              },
+              "wo_a.weight_scale_inv": {
+                "shape": [16, 8, 32],
+                "dtype": "torch.float32"
+              },
+              "n_groups": {
+                "scalar": 16
+              },
+              "heads_per_group": {
+                "scalar": 8
+              },
+              "nope_dim": {
+                "scalar": 448
+              },
+              "rope_dim": {
+                "scalar": 64
+              },
+              "o_lora_rank": {
+                "scalar": 1024
+              }
+            },
+            "outputs": {
+              "out": {
+                "shape": [4096, 16384],
+                "dtype": "torch.bfloat16"
+              }
+            },
+            "dims": {
+              "tokens": 4096,
+              "n_groups": 16,
+              "group_dim": 4096,
+              "o_lora_rank": 1024
+            }
+          },
+          "timing_protocol": "triton-do-bench-no-graph-25ms-warmup-100ms-median",
+          "latency_ms": 1.0534,
+          "bottle_neck_unit": "tensor"
+        }
       }
     }
-  }
+  },
+  "_note": "vLLM 0.32.0 H100 baseline from optest data/op_vllm032_h100_perf_baseline.json. The two 4096-token points were measured with the same vLLM 0.32.0 environment (H100 80GB, do_bench 25ms/100ms median) and roofline-classified as tensor-bound; all other points carry the collector's ncu-derived bottle_neck_unit."
 }
